@@ -10,30 +10,41 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public class MySQLProxy {
 
-    public MySQLProxy() {
-        this.stressTester = new DatabaseStressTester(); // Ensure this line exists
-    }
-
 
     private static final String DB_URL = "jdbc:mysql://localhost:3306/proxybase";
     private static final String DB_USER = "root";
     private static final String DB_PASSWORD = "root";
     private static final Map<String, Boolean> scenarios = new HashMap<>();
-    private static DatabaseStressTester stressTester;
+    private static DatabaseStressTester stressTester = new DatabaseStressTester(); // Initialize as static
 
     // Fetch the singleton instance of DatabaseStressTester
     public static DatabaseStressTester getStressTester() {
-        if (stressTester == null) {
-            stressTester = new DatabaseStressTester();  // Initialize the stressTester if it hasn't been initialized yet
-        }
         return stressTester;
     }
 
-    // Make the stress tester static AND singleton, to be accessible from controller
-    private static final PacketLossInjector packetLossInjector = new PacketLossInjector(0.1); // 10% loss rate
+    // Method to set connection info for the stress tester
+    public static void setStressTesterConnectionInfo(String jdbcUrl, String username, String password) {
+        if (stressTester != null) {
+            stressTester.setJdbcUrl(jdbcUrl);
+            stressTester.setUsername(username);
+            stressTester.setPassword(password);
+            frontendConfigured = true;
+            System.out.println("[MySQLProxy] Stress tester connection info set. frontendConfigured: " + frontendConfigured);
+        } else {
+            System.err.println("[MySQLProxy] Error: stressTester is not initialized.");
+        }
+    }
 
+    public static boolean isFrontendConfigured() {
+        return frontendConfigured;
+    }
+
+    // Make the packet loss injector static
+    private static final PacketLossInjector packetLossInjector = new PacketLossInjector(0.1); // 10% loss rate
+    private static boolean frontendConfigured = false; // Flag to track if frontend config is set
 
     public static void main(String[] args) throws IOException {
+        setStressTesterConnectionInfo(DB_URL, DB_USER, DB_PASSWORD); // Add this line
         updateScenariosOnce();
         new Thread(() -> {
             while (true) {
@@ -72,6 +83,8 @@ public class MySQLProxy {
         }
     }
 
+    // In MySQLProxy.java, modify the updateScenariosOnce() method:
+
     private static void updateScenariosOnce() {
         if (stressTester == null) {
             stressTester = new DatabaseStressTester(); // Ensure it's not null
@@ -108,11 +121,28 @@ public class MySQLProxy {
                 }
             }
 
-            // Check if stress testing is disabled in the database and stop it if necessary
+            // Check if stress testing is enabled in the database
             boolean stressTestingEnabled = scenarios.getOrDefault("stress_testing", false);
+
+            // Add detailed debugging
+            System.out.println("💥 [Stress Test] Status check:");
+            System.out.println("💥 [Stress Test] Scenario enabled in DB: " + stressTestingEnabled);
+            System.out.println("💥 [Stress Test] Frontend configured: " + isFrontendConfigured());
+            System.out.println("💥 [Stress Test] Currently running: " + stressTester.isRunning());
+
+            if (stressTestingEnabled) {
+                System.out.println("💥 [Stress Test] JDBC URL: " + stressTester.getJdbcUrl());
+                System.out.println("💥 [Stress Test] Username: " + stressTester.getUsername());
+                System.out.println("💥 [Stress Test] Password set: " + (stressTester.getPassword() != null));
+            }
+
             if (!stressTestingEnabled && stressTester.isRunning()) {
                 System.out.println("💥 [Stress Test] Stopping stress test from database update");
                 stressTester.stopStressTest();
+            } else if (stressTestingEnabled && isFrontendConfigured() && !stressTester.isRunning()) {
+                System.out.println("💥 [Stress Test] Scenario enabled and configured - attempting start from updateScenariosOnce");
+                boolean started = stressTester.startStressTest();
+                System.out.println("💥 [Stress Test] Start attempt result: " + started);
             }
 
             System.out.println("Scenarios fetched and updated.");
@@ -161,6 +191,8 @@ public class MySQLProxy {
 
                 if (!currentState.isHandshakeComplete() && isOkPacket(packet)) {
                     currentState.setHandshakeComplete(true);
+                    System.out.println("[MySQLProxy] Handshake complete for a connection.");
+                    attemptStartStressTest(); // Attempt to start on handshake completion
                 }
 
                 if (currentState.isHandshakeComplete() && currentState.isAddDelay()) {
@@ -177,12 +209,8 @@ public class MySQLProxy {
                     continue;
                 }
 
-                // Trigger the stress test if enabled and not already running
-                if (isScenarioEnabled("stress_testing") && currentState.isHandshakeComplete() && !stressTester.isRunning()) {
-                    System.out.println("💥 [Stress Test] Triggering intensive queries");
-                    stressTester.startStressTest(); // Trigger stress test
-                } else if (!isScenarioEnabled("stress_testing") && stressTester.isRunning()) {
-                    // Stop if scenario disabled but test still running
+                // Stop stress test if scenario is disabled
+                if (!isScenarioEnabled("stress_testing") && stressTester.isRunning()) {
                     System.out.println("💥 [Stress Test] Stopping test as scenario is disabled");
                     stressTester.stopStressTest();
                 }
@@ -192,6 +220,15 @@ public class MySQLProxy {
             }
         } catch (IOException | InterruptedException e) {
             System.err.println("Server to client error: " + e.getMessage());
+        }
+    }
+
+    private static void attemptStartStressTest() {
+        if (isScenarioEnabled("stress_testing") && isFrontendConfigured() && !stressTester.isRunning()) {
+            System.out.println("💥 [Stress Test] Attempting to start stress test - Scenario: " + isScenarioEnabled("stress_testing") + ", Configured: " + isFrontendConfigured() + ", Running: " + stressTester.isRunning());
+            stressTester.startStressTest();
+        } else {
+            System.out.println("[MySQLProxy] Conditions not met to start stress test - Scenario: " + isScenarioEnabled("stress_testing") + ", Configured: " + isFrontendConfigured() + ", Running: " + stressTester.isRunning());
         }
     }
 
@@ -281,7 +318,7 @@ public class MySQLProxy {
         }
     }
 
-    static class ConnectionState {
+    public static class ConnectionState {
         private String currentQueryType;
         private boolean addDelay;
         private boolean handshakeComplete = false;

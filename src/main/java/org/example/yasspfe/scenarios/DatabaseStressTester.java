@@ -3,6 +3,7 @@ package org.example.yasspfe.scenarios;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import net.ttddyy.dsproxy.QueryCountHolder;
+import org.example.yasspfe.entities.DatabaseConfig;
 import org.springframework.stereotype.Component;
 
 import java.sql.Connection;
@@ -24,31 +25,70 @@ import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class DatabaseStressTester {
-    private static final String URL = "jdbc:mysql://localhost:3306/bloggerplatform";
-    private static final String USER = "root";
-    private static final String PASSWORD = "root";
-    private static final int THREAD_MULTIPLIER = 4; // Increased from 2
+    private String jdbcUrl;
+    private String username;
+    private String password;
+
+    private static final int THREAD_MULTIPLIER = 4;
     private static final int REPORT_INTERVAL = 1000; // Report every 1000 queries
     private static final Random RANDOM = new Random();
 
     private final AtomicInteger totalQueries = new AtomicInteger(0);
     private final AtomicBoolean running = new AtomicBoolean(false);
-    private HikariDataSource dataSource;
-    private ExecutorService executor;
-    private Map<String, List<String>> tableColumns = new HashMap<>();
+    private volatile HikariDataSource dataSource;
+    private volatile ExecutorService executor;
+    private final Map<String, List<String>> tableColumns = new HashMap<>();
 
+    public String getJdbcUrl() {
+        return jdbcUrl;
+    }
+
+    public void setJdbcUrl(String jdbcUrl) {
+        this.jdbcUrl = jdbcUrl;
+    }
+
+    public String getUsername() {
+        return username;
+    }
+
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+
+    // Added overloaded method for main() usage
+    public boolean startStressTest() {
+        // Use configured values if they're set
+        if (jdbcUrl != null && username != null && password != null) {
+            DatabaseConfig config = new DatabaseConfig(jdbcUrl, username, password);
+            return startStressTest(config);
+        } else {
+            System.err.println("❌ Cannot start stress test: database connection details not configured");
+            return false;
+        }
+    }
 
     // Start the stress test if not already running
-    public synchronized boolean startStressTest() {
+    public boolean startStressTest(DatabaseConfig config) {
+        System.out.println("🔍 Proxy triggered startStressTest with config: " + config);
+
         if (running.compareAndSet(false, true)) {
-            System.out.println("🔴 Starting Database Stress Test...");
+            System.out.println("🔴 Starting Database Stress Test with dynamic config...");
+
             try {
-                initializeDataSource();
+                initializeDataSource(config);
                 List<String> tables = getTables();
 
                 if (tables.isEmpty()) {
                     System.err.println("❌ No tables found in the database!");
-                    running.set(false);
+                    shutdownResources();
                     return false;
                 }
 
@@ -85,7 +125,7 @@ public class DatabaseStressTester {
             } catch (Exception e) {
                 System.err.println("❌ Error starting stress test: " + e.getMessage());
                 e.printStackTrace();
-                running.set(false);
+                shutdownResources();
                 return false;
             }
         } else {
@@ -107,6 +147,11 @@ public class DatabaseStressTester {
         running.set(false);
         System.out.println("🛑 Stopping stress test... running flag set to: " + running.get());
 
+        return shutdownResources();
+    }
+
+    // Private method to handle resource shutdown logic (extracted for reuse)
+    private boolean shutdownResources() {
         boolean success = true;
 
         // Shutdown the executor service
@@ -150,26 +195,36 @@ public class DatabaseStressTester {
         dataSource = null;
         tableColumns.clear();
 
+        // Make sure running is set to false
+        running.set(false);
+
         System.out.println("✅ Stress test shutdown completed. Total queries executed: " + totalQueries.get());
         return success;
     }
 
-    private void initializeDataSource() {
-        HikariConfig config = new HikariConfig();
-        config.setJdbcUrl(URL);
-        config.setUsername(USER);
-        config.setPassword(PASSWORD);
-        config.setMinimumIdle(20);  // Increased
-        config.setIdleTimeout(30000);  // Increased to 30 seconds
-        config.setMaxLifetime(1800000);  // Increased to 30 minutes
-        config.setConnectionTimeout(10000);  // Increased to 10 seconds
-        config.setMaximumPoolSize(250);  // Increased pool size
-        config.addDataSourceProperty("cachePrepStmts", "true");
-        config.addDataSourceProperty("prepStmtCacheSize", "250");
-        config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
-        config.addDataSourceProperty("useServerPrepStmts", "true");
+    private void initializeDataSource(DatabaseConfig config) {
+        HikariConfig hikariConfig = new HikariConfig();
+        hikariConfig.setJdbcUrl(config.getJdbcUrl());
+        hikariConfig.setUsername(config.getUsername());
+        hikariConfig.setPassword(config.getPassword());
 
-        dataSource = new HikariDataSource(config);
+        // Save for reference
+        this.jdbcUrl = config.getJdbcUrl();
+        this.username = config.getUsername();
+        this.password = config.getPassword();
+
+
+        hikariConfig.setMinimumIdle(20);
+        hikariConfig.setIdleTimeout(30000);
+        hikariConfig.setMaxLifetime(1800000);
+        hikariConfig.setConnectionTimeout(10000);
+        hikariConfig.setMaximumPoolSize(250);
+        hikariConfig.addDataSourceProperty("cachePrepStmts", "true");
+        hikariConfig.addDataSourceProperty("prepStmtCacheSize", "250");
+        hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
+        hikariConfig.addDataSourceProperty("useServerPrepStmts", "true");
+
+        dataSource = new HikariDataSource(hikariConfig);
     }
 
     private List<String> getTables() {
@@ -217,7 +272,11 @@ public class DatabaseStressTester {
                 int currentCount = totalQueries.get();
                 long currentTime = System.currentTimeMillis();
 
-                double qps = (currentCount - lastCount) / ((currentTime - lastTime) / 1000.0);
+                // Avoid division by zero
+                double timeElapsed = (currentTime - lastTime) / 1000.0;
+                if (timeElapsed <= 0) timeElapsed = 0.001; // Ensure we don't divide by zero
+
+                double qps = (currentCount - lastCount) / timeElapsed;
 
                 System.out.println("📊 PERFORMANCE: " + String.format("%.2f", qps) +
                         " queries/sec | Total: " + currentCount);
@@ -226,7 +285,7 @@ public class DatabaseStressTester {
                 lastTime = currentTime;
 
                 // Check connection pool statistics
-                if (dataSource != null) {
+                if (dataSource != null && !dataSource.isClosed()) {
                     System.out.println("🔌 CONNECTIONS: Active=" + dataSource.getHikariPoolMXBean().getActiveConnections() +
                             " | Idle=" + dataSource.getHikariPoolMXBean().getIdleConnections() +
                             " | Waiting=" + dataSource.getHikariPoolMXBean().getThreadsAwaitingConnection());
@@ -243,14 +302,16 @@ public class DatabaseStressTester {
     }
 
     private void runQueriesIndefinitely(String table) {
-        Connection connection = null;
+        String threadName = Thread.currentThread().getName();
+        System.out.println("🟢 Running queries on table: " + table + " in thread: " + threadName);
+
         List<String> columns = tableColumns.get(table);
+        if (columns == null || columns.isEmpty()) {
+            System.err.println("⚠ No columns found for table " + table + ", skipping query thread");
+            return;
+        }
 
-        try {
-            connection = dataSource.getConnection();
-            String threadName = Thread.currentThread().getName();
-            System.out.println("🟢 Running queries on table: " + table + " in thread: " + threadName);
-
+        try (Connection connection = dataSource.getConnection()) {
             // Main query loop
             while (running.get() && !Thread.currentThread().isInterrupted()) {
                 try {
@@ -258,46 +319,41 @@ public class DatabaseStressTester {
                     int queryType = RANDOM.nextInt(4);
                     switch (queryType) {
                         case 0: // Simple count
-                            try (Statement stmt = connection.createStatement()) {
-                                ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM " + table);
+                            try (Statement stmt = connection.createStatement();
+                                 ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM " + table)) {
                                 rs.next(); // Actually read the result
-                                rs.close();
                             }
                             break;
 
                         case 1: // Select with limit - forces more work and less caching
-                            try (Statement stmt = connection.createStatement()) {
-                                // Add LIMIT with random offset to prevent caching
-                                int offset = RANDOM.nextInt(100);
-                                ResultSet rs = stmt.executeQuery("SELECT * FROM " + table + " LIMIT " + offset + ", 20");
+                            try (Statement stmt = connection.createStatement();
+                                 ResultSet rs = stmt.executeQuery("SELECT * FROM " + table +
+                                         " LIMIT " + RANDOM.nextInt(100) + ", 20")) {
                                 while (rs.next()) { /* Read all results */ }
-                                rs.close();
                             }
                             break;
 
                         case 2: // Select with random sorting if we have columns
                             if (!columns.isEmpty()) {
-                                try (Statement stmt = connection.createStatement()) {
-                                    String column = columns.get(RANDOM.nextInt(columns.size()));
-                                    String order = RANDOM.nextBoolean() ? "ASC" : "DESC";
-                                    ResultSet rs = stmt.executeQuery("SELECT * FROM " + table +
-                                            " ORDER BY " + column + " " + order +
-                                            " LIMIT 50");
+                                String column = columns.get(RANDOM.nextInt(columns.size()));
+                                String order = RANDOM.nextBoolean() ? "ASC" : "DESC";
+                                try (Statement stmt = connection.createStatement();
+                                     ResultSet rs = stmt.executeQuery("SELECT * FROM " + table +
+                                             " ORDER BY " + column + " " + order +
+                                             " LIMIT 50")) {
                                     while (rs.next()) { /* Read all results */ }
-                                    rs.close();
                                 }
                             }
                             break;
 
                         case 3: // Conditional select if we have columns
                             if (columns.size() > 1) {
-                                try (Statement stmt = connection.createStatement()) {
-                                    String column = columns.get(RANDOM.nextInt(columns.size()));
-                                    ResultSet rs = stmt.executeQuery("SELECT * FROM " + table +
-                                            " WHERE " + column + " IS NOT NULL " +
-                                            " LIMIT 30");
+                                String column = columns.get(RANDOM.nextInt(columns.size()));
+                                try (Statement stmt = connection.createStatement();
+                                     ResultSet rs = stmt.executeQuery("SELECT * FROM " + table +
+                                             " WHERE " + column + " IS NOT NULL " +
+                                             " LIMIT 30")) {
                                     while (rs.next()) { /* Read all results */ }
-                                    rs.close();
                                 }
                             }
                             break;
@@ -333,80 +389,68 @@ public class DatabaseStressTester {
             }
         } catch (Exception e) {
             System.err.println("⚠ Error in query thread for table " + table + ": " + e.getMessage());
-        } finally {
-            // Close resources properly
-            try {
-                if (connection != null) connection.close();
-            } catch (SQLException e) {
-                System.err.println("⚠ Error closing resources: " + e.getMessage());
-            }
-            System.out.println("🔴 Query thread TERMINATED for table: " + table);
         }
+
+        System.out.println("🔴 Query thread TERMINATED for table: " + table);
     }
 
     private void runComplexQueries(String table) {
-        Connection connection = null;
+        String threadName = Thread.currentThread().getName();
+        System.out.println("🟣 Running complex queries on table: " + table + " in thread: " + threadName);
+
         List<String> columns = tableColumns.get(table);
+        if (columns == null || columns.isEmpty()) {
+            System.err.println("⚠ No columns found for table " + table + ", skipping complex query thread");
+            return;
+        }
 
-        try {
-            connection = dataSource.getConnection();
-            String threadName = Thread.currentThread().getName();
-            System.out.println("🟣 Running complex queries on table: " + table + " in thread: " + threadName);
-
+        try (Connection connection = dataSource.getConnection()) {
             // Main query loop
             while (running.get() && !Thread.currentThread().isInterrupted()) {
                 try {
-                    if (!columns.isEmpty()) {
-                        try (Statement stmt = connection.createStatement()) {
-                            // These queries are more expensive and force index usage
-                            int queryType = RANDOM.nextInt(3);
+                    int queryType = RANDOM.nextInt(3);
 
-                            switch (queryType) {
-                                case 0:
-                                    // Group by query
-                                    String groupColumn = columns.get(RANDOM.nextInt(columns.size()));
-                                    ResultSet rs = stmt.executeQuery(
-                                            "SELECT " + groupColumn + ", COUNT(*) " +
-                                                    "FROM " + table + " " +
-                                                    "GROUP BY " + groupColumn + " " +
-                                                    "LIMIT 50"
-                                    );
+                    try (Statement stmt = connection.createStatement()) {
+                        switch (queryType) {
+                            case 0:
+                                // Group by query
+                                String groupColumn = columns.get(RANDOM.nextInt(columns.size()));
+                                try (ResultSet rs = stmt.executeQuery(
+                                        "SELECT " + groupColumn + ", COUNT(*) " +
+                                                "FROM " + table + " " +
+                                                "GROUP BY " + groupColumn + " " +
+                                                "LIMIT 50")) {
                                     while (rs.next()) { /* Read all results */ }
-                                    rs.close();
-                                    break;
+                                }
+                                break;
 
-                                case 1:
-                                    // Full table scan with complex WHERE clause
-                                    if (columns.size() > 1) {
-                                        String col1 = columns.get(RANDOM.nextInt(columns.size()));
-                                        String col2 = columns.get(RANDOM.nextInt(columns.size()));
-                                        ResultSet rs2 = stmt.executeQuery(
-                                                "SELECT * FROM " + table + " " +
-                                                        "WHERE " + col1 + " IS NOT NULL OR " + col2 + " IS NOT NULL " +
-                                                        "LIMIT 100"
-                                        );
-                                        while (rs2.next()) { /* Read all results */ }
-                                        rs2.close();
+                            case 1:
+                                // Full table scan with complex WHERE clause
+                                if (columns.size() > 1) {
+                                    String col1 = columns.get(RANDOM.nextInt(columns.size()));
+                                    String col2 = columns.get(RANDOM.nextInt(columns.size()));
+                                    try (ResultSet rs = stmt.executeQuery(
+                                            "SELECT * FROM " + table + " " +
+                                                    "WHERE " + col1 + " IS NOT NULL OR " + col2 + " IS NOT NULL " +
+                                                    "LIMIT 100")) {
+                                        while (rs.next()) { /* Read all results */ }
                                     }
-                                    break;
+                                }
+                                break;
 
-                                case 2:
-                                    // LIKE query (expensive)
-                                    if (columns.size() > 0) {
-                                        String col = columns.get(RANDOM.nextInt(columns.size()));
-                                        ResultSet rs3 = stmt.executeQuery(
-                                                "SELECT * FROM " + table + " " +
-                                                        "WHERE " + col + " LIKE '%a%' " +
-                                                        "LIMIT 100"
-                                        );
-                                        while (rs3.next()) { /* Read all results */ }
-                                        rs3.close();
-                                    }
-                                    break;
-                            }
-
-                            totalQueries.incrementAndGet();
+                            case 2:
+                                // LIKE query (expensive)
+                                String col = columns.get(RANDOM.nextInt(columns.size()));
+                                try (ResultSet rs = stmt.executeQuery(
+                                        "SELECT * FROM " + table + " " +
+                                                "WHERE " + col + " LIKE '%a%' " +
+                                                "LIMIT 100")) {
+                                    while (rs.next()) { /* Read all results */ }
+                                }
+                                break;
                         }
+
+                        totalQueries.incrementAndGet();
                     }
 
                     // Sleep a bit longer between complex queries
@@ -429,23 +473,22 @@ public class DatabaseStressTester {
             }
         } catch (Exception e) {
             System.err.println("⚠ Error in complex query thread for table " + table + ": " + e.getMessage());
-        } finally {
-            try {
-                if (connection != null) connection.close();
-            } catch (SQLException e) {
-                System.err.println("⚠ Error closing resources: " + e.getMessage());
-            }
-            System.out.println("🔴 Complex query thread TERMINATED for table: " + table);
         }
+
+        System.out.println("🔴 Complex query thread TERMINATED for table: " + table);
     }
 
     private void runWriteOperations(String table) {
-        Connection connection = null;
-        try {
-            connection = dataSource.getConnection();
-            String threadName = Thread.currentThread().getName();
-            System.out.println("📝 Running write operations on table: " + table + " in thread: " + threadName);
+        String threadName = Thread.currentThread().getName();
+        System.out.println("📝 Running write operations on table: " + table + " in thread: " + threadName);
 
+        List<String> columns = tableColumns.get(table);
+        if (columns == null || columns.size() <= 1) {
+            System.err.println("⚠ Not enough columns for write operations on table " + table + ", skipping write thread");
+            return;
+        }
+
+        try (Connection connection = dataSource.getConnection()) {
             // We'll perform read operations frequently, but occasionally do writes
             while (running.get() && !Thread.currentThread().isInterrupted()) {
                 try {
@@ -455,17 +498,13 @@ public class DatabaseStressTester {
                         connection.setAutoCommit(false);
                         try (Statement stmt = connection.createStatement()) {
                             // First get count to see if we have rows
-                            ResultSet countRs = stmt.executeQuery("SELECT COUNT(*) FROM " + table);
-                            countRs.next();
-                            int count = countRs.getInt(1);
-                            countRs.close();
+                            try (ResultSet countRs = stmt.executeQuery("SELECT COUNT(*) FROM " + table)) {
+                                countRs.next();
+                                int count = countRs.getInt(1);
 
-                            if (count > 0) {
-                                // Try a simple update - limit to a single row to avoid too much damage
-                                stmt.execute("BEGIN");
+                                if (count > 0) {
+                                    stmt.execute("BEGIN");
 
-                                List<String> columns = tableColumns.get(table);
-                                if (columns.size() > 1) {
                                     // Find a good column to update
                                     String updateColumn = null;
                                     for (String col : columns) {
@@ -485,9 +524,9 @@ public class DatabaseStressTester {
                                         );
 
                                         // Update successful - now perform some selects in the same transaction
-                                        ResultSet rs = stmt.executeQuery("SELECT * FROM " + table + " LIMIT 10");
-                                        while (rs.next()) { /* read results */ }
-                                        rs.close();
+                                        try (ResultSet rs = stmt.executeQuery("SELECT * FROM " + table + " LIMIT 10")) {
+                                            while (rs.next()) { /* read results */ }
+                                        }
 
                                         connection.commit();
 
@@ -506,14 +545,17 @@ public class DatabaseStressTester {
                             System.err.println("⚠ Write operation error on table " + table + ": " + e.getMessage());
                         } finally {
                             // Reset auto commit
-                            connection.setAutoCommit(true);
+                            try {
+                                connection.setAutoCommit(true);
+                            } catch (SQLException e) {
+                                System.err.println("⚠ Error resetting autocommit: " + e.getMessage());
+                            }
                         }
                     } else {
                         // Just do a simple select query
-                        try (Statement stmt = connection.createStatement()) {
-                            ResultSet rs = stmt.executeQuery("SELECT * FROM " + table + " LIMIT 10");
+                        try (Statement stmt = connection.createStatement();
+                             ResultSet rs = stmt.executeQuery("SELECT * FROM " + table + " LIMIT 10")) {
                             while (rs.next()) { /* read results */ }
-                            rs.close();
                             totalQueries.incrementAndGet();
                         }
                     }
@@ -537,21 +579,15 @@ public class DatabaseStressTester {
             }
         } catch (Exception e) {
             System.err.println("⚠ Error in write thread for table " + table + ": " + e.getMessage());
-        } finally {
-            try {
-                if (connection != null) connection.close();
-            } catch (SQLException e) {
-                System.err.println("⚠ Error closing resources: " + e.getMessage());
-            }
-            System.out.println("🔴 Write thread TERMINATED for table: " + table);
         }
+
+        System.out.println("🔴 Write thread TERMINATED for table: " + table);
     }
 
     // Check if the stress test is running
     public boolean isRunning() {
         return running.get();
     }
-
 
     // Force stop method for emergency use
     public void forceStop() {
@@ -577,18 +613,28 @@ public class DatabaseStressTester {
         System.out.println("💥 Force stop completed");
     }
 
+    // Get total queries executed so far
+    public int getTotalQueries() {
+        return totalQueries.get();
+    }
+
     // For standalone testing
     public static void main(String[] args) {
+        // Create a tester with configured connection details
         DatabaseStressTester tester = new DatabaseStressTester();
-        tester.startStressTest();
+        tester.setJdbcUrl("jdbc:mysql://localhost:3306/testdb");
+        tester.setUsername("root");
+        tester.setPassword("password");
+
+        // Start the test using the no-arg method that will use the configured values
+        boolean success = tester.startStressTest();
+
+        if (!success) {
+            System.err.println("Failed to start database stress test");
+            return;
+        }
 
         // Add shutdown hook for clean exit
         Runtime.getRuntime().addShutdownHook(new Thread(tester::stopStressTest));
     }
-
-    public Object getActiveThreadCount() {
-        return totalQueries.get();
-    }
-
-
 }

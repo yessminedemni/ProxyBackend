@@ -1,9 +1,9 @@
 package org.example.yasspfe.controllers;
 
+import org.example.yasspfe.scenarios.MySQLProxy;
 import org.example.yasspfe.services.ScenarioService;
 import org.example.yasspfe.entities.Scenario;
 import org.example.yasspfe.scenarios.DatabaseStressTester;
-import org.example.yasspfe.scenarios.MySQLProxy;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.http.HttpStatus;
@@ -44,26 +44,48 @@ public class ScenarioController {
     public ResponseEntity<Map<String, Object>> enableScenario(@PathVariable String name) {
         logger.info("Enable scenario request received: {}", name);
         boolean success = false;
+
+        // Add more detailed logging
         if ("stress_testing".equals(name)) {
+            logger.info("Enabling stress_testing scenario");
+            logger.info("Frontend configured: {}", MySQLProxy.isFrontendConfigured());
+            logger.info("Current JDBC URL: {}", databaseStressTester.getJdbcUrl());
+            logger.info("Current Username: {}", databaseStressTester.getUsername());
+            logger.info("Current Password set: {}", databaseStressTester.getPassword() != null);
+
             success = databaseStressTester.startStressTest();
             logger.info("Stress test start result: {}", success);
+
+            if (!success) {
+                logger.warn("Failed to start stress test. Check if database connection is configured.");
+            }
         }
+
         scenarioService.enableScenario(name);
-        return ResponseEntity.ok(Map.of("success", true, "message", "Enabled " + name, "operationSuccess", success));
+        return ResponseEntity.ok(Map.of(
+                "success", true,
+                "message", "Enabled " + name,
+                "operationSuccess", success,
+                "frontendConfigured", MySQLProxy.isFrontendConfigured()
+        ));
     }
 
     @PostMapping("/disable/{name}")
     public ResponseEntity<Map<String, Object>> disableScenario(@PathVariable String name) {
         logger.info("Disabling scenario: {}", name);
-        boolean success = false;
+        boolean success = true;
+
         if ("stress_testing".equals(name) && databaseStressTester.isRunning()) {
+            logger.info("Stopping stress test");
             success = databaseStressTester.stopStressTest();
             logger.info("Stress test stop result: {}", success);
+
             if (!success) {
                 logger.warn("Normal stop failed, attempting force stop...");
                 databaseStressTester.forceStop();
             }
         }
+
         scenarioService.disableScenario(name);
         return ResponseEntity.ok(Map.of("success", true, "message", "Disabled " + name, "operationSuccess", success));
     }
@@ -71,6 +93,19 @@ public class ScenarioController {
     @GetMapping("/status/{name}")
     public ResponseEntity<Map<String, Object>> getScenarioStatus(@PathVariable String name) {
         boolean enabled = scenarioService.isScenarioEnabled(name);
+
+        // For stress_testing, also return if it's actually running
+        if ("stress_testing".equals(name)) {
+            boolean isRunning = databaseStressTester.isRunning();
+            boolean isConfigured = MySQLProxy.isFrontendConfigured();
+
+            return ResponseEntity.ok(Map.of(
+                    "enabled", enabled,
+                    "running", isRunning,
+                    "configured", isConfigured
+            ));
+        }
+
         return ResponseEntity.ok(Map.of("enabled", enabled));
     }
 
@@ -78,6 +113,23 @@ public class ScenarioController {
     public ResponseEntity<Map<String, Object>> toggleScenario(@PathVariable String name) {
         try {
             boolean result = scenarioService.toggleScenario(name);
+
+            // If toggled to enabled and it's the stress test, try to start it
+            if (result && "stress_testing".equals(name)) {
+                boolean started = databaseStressTester.startStressTest();
+                logger.info("Stress test auto-start on toggle: {}", started);
+                return ResponseEntity.ok(Map.of(
+                        "success", true,
+                        "enabled", result,
+                        "stressTestStarted", started
+                ));
+            }
+
+            // If toggled to disabled and it's the stress test, stop it
+            if (!result && "stress_testing".equals(name) && databaseStressTester.isRunning()) {
+                databaseStressTester.stopStressTest();
+            }
+
             return ResponseEntity.ok(Map.of("success", true, "enabled", result));
         } catch (Exception e) {
             logger.error("Error toggling scenario: {}", name, e);

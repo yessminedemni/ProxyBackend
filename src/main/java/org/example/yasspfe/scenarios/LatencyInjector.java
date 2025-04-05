@@ -1,5 +1,6 @@
 package org.example.yasspfe.scenarios;
 
+
 public class LatencyInjector {
 
     public  static void injectLatencyIfNeeded(MySQLProxy.ConnectionState state) throws InterruptedException {
