@@ -15,12 +15,30 @@ public class MySQLProxy {
     private static final String DB_USER = "root";
     private static final String DB_PASSWORD = "root";
     private static final Map<String, Boolean> scenarios = new HashMap<>();
-    private static DatabaseStressTester stressTester = new DatabaseStressTester(); // Initialize as static
+    private static DatabaseStressTester stressTester = new DatabaseStressTester();
 
-    // Fetch the singleton instance of DatabaseStressTester
+    private static String targetHost = "localhost"; // Default value
+    private static int targetPort = 3306;
+
+    public static void setTargetConnectionInfo(String host, int port) {
+        targetHost = host;
+        targetPort = port;
+        System.out.println("[MySQLProxy] Target connection info set to " + host + ":" + port);
+    }
+
+    public static String getTargetHost() {
+        return targetHost;
+    }
+
+    public static int getTargetPort() {
+        return targetPort;
+    }
+
     public static DatabaseStressTester getStressTester() {
         return stressTester;
     }
+
+
 
     // Method to set connection info for the stress tester
     public static void setStressTesterConnectionInfo(String jdbcUrl, String username, String password) {
@@ -46,9 +64,12 @@ public class MySQLProxy {
     public static void main(String[] args) throws IOException {
         setStressTesterConnectionInfo(DB_URL, DB_USER, DB_PASSWORD); // Add this line
         updateScenariosOnce();
+        updateTargetConnectionInfo(); // New method to get target connection info
+
         new Thread(() -> {
             while (true) {
                 updateScenariosOnce();
+                updateTargetConnectionInfo();
                 try {
                     Thread.sleep(5000); // Refresh every 5 seconds
                 } catch (InterruptedException e) {
@@ -64,7 +85,9 @@ public class MySQLProxy {
             Socket clientSocket = proxyServer.accept();
             System.out.println("New client connected: " + clientSocket.getRemoteSocketAddress());
 
-            Socket mysqlSocket = new Socket("localhost", 3306);
+            Socket mysqlSocket = new Socket(targetHost, targetPort);
+            System.out.println("Connected to target database at " + targetHost + ":" + targetPort);
+
             AtomicReference<ConnectionState> state = new AtomicReference<>(new ConnectionState());
 
             Thread clientToServer = new Thread(() -> forwardClientToServer(clientSocket, mysqlSocket, state));
@@ -83,12 +106,61 @@ public class MySQLProxy {
         }
     }
 
+
+
+    private static void updateTargetConnectionInfo() {
+        System.out.println("Fetching target database connection info...");
+        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
+             Statement stmt = conn.createStatement()) {
+
+            ResultSet rs = stmt.executeQuery("SELECT host, port FROM proxy_config ORDER BY id DESC LIMIT 1");
+
+            if (rs.next()) {
+                String host = rs.getString("host");
+                int port = rs.getInt("port");
+
+                // Check if host or port has changed and if so, update connection
+                if (!host.equals(targetHost) || port != targetPort) {
+                    // Check if the new host and port are reachable before updating
+                    if (!isDatabaseReachable(host, port)) {
+                        System.err.println("Error: Cannot connect to database at " + host + ":" + port);
+                        return; // Don't proceed if database is unreachable
+                    }
+                    setTargetConnectionInfo(host, port);
+                }
+            }
+
+        } catch (SQLException e) {
+            // Handle error if query fails (e.g., table not found)
+            System.err.println("Error fetching target connection info: " + e.getMessage());
+        }
+    }
+    private static boolean isDatabaseReachable(String host, int port) {
+        String jdbcUrl = "jdbc:mysql://" + host + ":" + port;
+        try (Connection conn = DriverManager.getConnection(jdbcUrl, DB_USER, DB_PASSWORD)) {
+            // If connection is established, database is reachable
+            return true;
+        } catch (SQLException e) {
+            // Connection failed, log the error
+            System.err.println("Error connecting to database: " + e.getMessage());
+            return false;
+        }
+    }
+
+
     // In MySQLProxy.java, modify the updateScenariosOnce() method:
 
     private static void updateScenariosOnce() {
         if (stressTester == null) {
             stressTester = new DatabaseStressTester(); // Ensure it's not null
         }
+
+        // Validate the database connection before proceeding with scenarios
+        if (!isDatabaseConnected()) {
+            System.err.println("[MySQLProxy] Unable to connect to database. Skipping scenario updates.");
+            return;  // Exit early if the connection is not valid
+        }
+
         System.out.println("Fetching scenario settings from the database...");
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
              Statement stmt = conn.createStatement()) {
@@ -121,10 +193,9 @@ public class MySQLProxy {
                 }
             }
 
-            // Check if stress testing is enabled in the database
+            // Continue with scenario checks as usual
             boolean stressTestingEnabled = scenarios.getOrDefault("stress_testing", false);
 
-            // Add detailed debugging
             System.out.println("💥 [Stress Test] Status check:");
             System.out.println("💥 [Stress Test] Scenario enabled in DB: " + stressTestingEnabled);
             System.out.println("💥 [Stress Test] Frontend configured: " + isFrontendConfigured());
@@ -144,12 +215,21 @@ public class MySQLProxy {
                 boolean started = stressTester.startStressTest();
                 System.out.println("💥 [Stress Test] Start attempt result: " + started);
             }
-
-            System.out.println("Scenarios fetched and updated.");
         } catch (SQLException e) {
-            System.err.println("Error fetching scenario settings: " + e.getMessage());
+            System.err.println("[MySQLProxy] Error fetching scenario settings: " + e.getMessage());
         }
     }
+
+    // Add a method to validate the connection before applying scenarios
+    private static boolean isDatabaseConnected() {
+        try (Connection conn = DriverManager.getConnection("jdbc:mysql://" + targetHost + ":" + targetPort + "/proxybase", DB_USER, DB_PASSWORD)) {
+            return conn != null && !conn.isClosed();
+        } catch (SQLException e) {
+            System.err.println("[MySQLProxy] Connection failed: " + e.getMessage());
+            return false;
+        }
+    }
+
 
     private static void forwardClientToServer(Socket clientSocket, Socket mysqlSocket, AtomicReference<ConnectionState> state) {
         try (InputStream clientIn = clientSocket.getInputStream();
