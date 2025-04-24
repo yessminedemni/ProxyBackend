@@ -30,7 +30,7 @@ public class DatabaseStressTester {
     private String password;
 
     private static final int THREAD_MULTIPLIER = 4;
-    private static final int REPORT_INTERVAL = 1000; // Report every 1000 queries
+    private static final int REPORT_INTERVAL = 1000;
     private static final Random RANDOM = new Random();
 
     private final AtomicInteger totalQueries = new AtomicInteger(0);
@@ -75,7 +75,6 @@ public class DatabaseStressTester {
         }
     }
 
-    // Start the stress test if not already running
     public boolean startStressTest(DatabaseConfig config) {
         System.out.println("🔍 Proxy triggered startStressTest with config: " + config);
 
@@ -92,7 +91,6 @@ public class DatabaseStressTester {
                     return false;
                 }
 
-                // Get column information for each table
                 for (String table : tables) {
                     tableColumns.put(table, getTableColumns(table));
                 }
@@ -111,7 +109,6 @@ public class DatabaseStressTester {
                         executor.execute(() -> runQueriesIndefinitely(table));
                     }
 
-                    // Add some write operations if table has more than one column
                     if (tableColumns.get(table).size() > 1) {
                         executor.execute(() -> runWriteOperations(table));
                     }
@@ -134,7 +131,6 @@ public class DatabaseStressTester {
         }
     }
 
-    // Stop the stress test if it's running
     public synchronized boolean stopStressTest() {
         System.out.println("🛑 stopStressTest() CALLED!");
 
@@ -150,7 +146,6 @@ public class DatabaseStressTester {
         return shutdownResources();
     }
 
-    // Private method to handle resource shutdown logic (extracted for reuse)
     private boolean shutdownResources() {
         boolean success = true;
 
@@ -179,7 +174,6 @@ public class DatabaseStressTester {
             }
         }
 
-        // Close the connection pool
         if (dataSource != null && !dataSource.isClosed()) {
             try {
                 dataSource.close();
@@ -190,7 +184,6 @@ public class DatabaseStressTester {
             }
         }
 
-        // Reset the executor to null to prevent reuse
         executor = null;
         dataSource = null;
         tableColumns.clear();
@@ -272,7 +265,6 @@ public class DatabaseStressTester {
                 int currentCount = totalQueries.get();
                 long currentTime = System.currentTimeMillis();
 
-                // Avoid division by zero
                 double timeElapsed = (currentTime - lastTime) / 1000.0;
                 if (timeElapsed <= 0) timeElapsed = 0.001; // Ensure we don't divide by zero
 
@@ -284,7 +276,6 @@ public class DatabaseStressTester {
                 lastCount = currentCount;
                 lastTime = currentTime;
 
-                // Check connection pool statistics
                 if (dataSource != null && !dataSource.isClosed()) {
                     System.out.println("🔌 CONNECTIONS: Active=" + dataSource.getHikariPoolMXBean().getActiveConnections() +
                             " | Idle=" + dataSource.getHikariPoolMXBean().getIdleConnections() +
@@ -381,7 +372,6 @@ public class DatabaseStressTester {
                     break;
                 }
 
-                // Double check in case we missed an interrupt
                 if (!running.get() || Thread.currentThread().isInterrupted()) {
                     System.out.println("🔵 Exit condition detected for " + threadName + " on table: " + table);
                     break;
@@ -459,7 +449,7 @@ public class DatabaseStressTester {
                 } catch (SQLException e) {
                     if (running.get()) {
                         System.err.println("⚠ SQL Error on complex query for table " + table + ": " + e.getMessage());
-                        Thread.sleep(200); // Pause before retry
+                        Thread.sleep(200);
                     }
                 } catch (InterruptedException e) {
                     System.out.println("🔵 Complex query thread " + threadName + " interrupted for table: " + table);
@@ -489,11 +479,8 @@ public class DatabaseStressTester {
         }
 
         try (Connection connection = dataSource.getConnection()) {
-            // We'll perform read operations frequently, but occasionally do writes
             while (running.get() && !Thread.currentThread().isInterrupted()) {
                 try {
-                    // Most of the time, do selects to avoid messing up the database
-                    // but occasionally do a transaction with writes
                     if (RANDOM.nextInt(20) == 0) { // 5% chance of write operation
                         connection.setAutoCommit(false);
                         try (Statement stmt = connection.createStatement()) {
@@ -505,7 +492,6 @@ public class DatabaseStressTester {
                                 if (count > 0) {
                                     stmt.execute("BEGIN");
 
-                                    // Find a good column to update
                                     String updateColumn = null;
                                     for (String col : columns) {
                                         if (!col.equalsIgnoreCase("id") &&
@@ -517,7 +503,6 @@ public class DatabaseStressTester {
                                     }
 
                                     if (updateColumn != null) {
-                                        // Execute an update that's unlikely to break things
                                         int updated = stmt.executeUpdate(
                                                 "UPDATE " + table + " SET " + updateColumn + " = " + updateColumn +
                                                         " LIMIT 1"
@@ -536,7 +521,6 @@ public class DatabaseStressTester {
                                 }
                             }
                         } catch (SQLException e) {
-                            // Rollback on error
                             try {
                                 connection.rollback();
                             } catch (SQLException e2) {
@@ -584,26 +568,21 @@ public class DatabaseStressTester {
         System.out.println("🔴 Write thread TERMINATED for table: " + table);
     }
 
-    // Check if the stress test is running
     public boolean isRunning() {
         return running.get();
     }
 
-    // Force stop method for emergency use
     public void forceStop() {
         System.out.println("💥 FORCE STOP REQUESTED!");
 
-        // Set flag to false
         running.set(false);
 
-        // Force shutdown executor
         if (executor != null) {
             List<Runnable> tasks = executor.shutdownNow();
             System.out.println("💥 Forcibly shutdown executor with " + tasks.size() + " pending tasks");
             executor = null;
         }
 
-        // Force close datasource
         if (dataSource != null) {
             dataSource.close();
             dataSource = null;
@@ -613,7 +592,6 @@ public class DatabaseStressTester {
         System.out.println("💥 Force stop completed");
     }
 
-    // Get total queries executed so far
     public int getTotalQueries() {
         return totalQueries.get();
     }
@@ -634,7 +612,6 @@ public class DatabaseStressTester {
             return;
         }
 
-        // Add shutdown hook for clean exit
         Runtime.getRuntime().addShutdownHook(new Thread(tester::stopStressTest));
     }
 }

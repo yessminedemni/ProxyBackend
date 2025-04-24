@@ -16,11 +16,11 @@ public class LatencyInjector {
     public static long getLatencyForType(String type) {
         if (type == null) return 0;
         return switch (type) {
-            case "DQL" -> 600;   // e.g., SELECT, SHOW
-            case "DML" -> 60000; // e.g., INSERT, UPDATE, DELETE
-            case "DDL" -> 500;   // e.g., CREATE, DROP
-            case "TCL" -> 150;   // e.g., COMMIT, ROLLBACK
-            case "DCL" -> 250;   // e.g., GRANT, REVOKE
+            case "DQL" -> 600;   //  SELECT, SHOW
+            case "DML" -> 60000; //  INSERT, UPDATE, DELETE
+            case "DDL" -> 500;   //  CREATE, DROP
+            case "TCL" -> 150;   //  COMMIT, ROLLBACK
+            case "DCL" -> 250;   //  GRANT, REVOKE
             default -> 0;        // OTHER
         };
     }
