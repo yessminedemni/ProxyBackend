@@ -16,15 +16,25 @@ public class MySQLProxy {
     private static final String DB_PASSWORD = "root";
     private static final Map<String, Boolean> scenarios = new HashMap<>();
     private static DatabaseStressTester stressTester = new DatabaseStressTester();
+    private static final QueryBlackholeInjector queryBlackholeInjector = new QueryBlackholeInjector();
+    private static final ConnectionKillInjector connectionKillInjector = new ConnectionKillInjector();
+    private static final DiskFaultInjector diskFaultInjector = new DiskFaultInjector();
+
+
+
+
+
 
     private static String targetHost = "localhost"; // Default value
     private static int targetPort = 3306;
 
+
     public static void setTargetConnectionInfo(String host, int port) {
         targetHost = host;
         targetPort = port;
-        System.out.println("[MySQLProxy] Target connection info set to " + host + ":" + port);
+        System.out.println("[MySQLProxy] Target connection info set to " + host + ":" + port + ", DB: " );
     }
+
 
     public static String getTargetHost() {
         return targetHost;
@@ -154,12 +164,25 @@ public class MySQLProxy {
         if (stressTester == null) {
             stressTester = new DatabaseStressTester(); // Ensure it's not null
         }
+        boolean blackholeEnabled = scenarios.getOrDefault("query_blackhole", false);
+        queryBlackholeInjector.setEnabled(blackholeEnabled);
+        System.out.println("🛑 [Query Blackhole] Scenario enabled: " + blackholeEnabled);
+
 
         // Validate the database connection before proceeding with scenarios
         if (!isDatabaseConnected()) {
             System.err.println("[MySQLProxy] Unable to connect to database. Skipping scenario updates.");
             return;  // Exit early if the connection is not valid
         }
+        boolean killEnabled = scenarios.getOrDefault("connection_kill", false);
+        connectionKillInjector.setEnabled(killEnabled);
+        System.out.println("💣 [Connection Kill] Scenario enabled: " + killEnabled);
+
+        boolean diskFaultEnabled = scenarios.getOrDefault("disk_fault_injection", false);
+        diskFaultInjector.setEnabled(diskFaultEnabled);
+        System.out.println("🗃️ [Disk Fault] Scenario enabled: " + diskFaultEnabled);
+
+
 
         System.out.println("Fetching scenario settings from the database...");
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
@@ -192,6 +215,7 @@ public class MySQLProxy {
                     scenarios.put(scenarioName, isEnabled);
                 }
             }
+
 
             // Continue with scenario checks as usual
             boolean stressTestingEnabled = scenarios.getOrDefault("stress_testing", false);
@@ -249,8 +273,34 @@ public class MySQLProxy {
                     if (query != null) {
                         currentState.setCurrentQueryType(getQueryType(query));
                         System.out.println("Detected query: " + query);
+
+                        // 💣 Call the connection kill scenario
+                        if (connectionKillInjector.shouldKill(query)) {
+                            connectionKillInjector.killConnection(clientSocket);
+                            return; // 💥 Kill and stop forwarding
+                        }
+
+                        // ✅ Log for query blackhole (optional)
+                        try (Connection conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/proxybase", "root", "root")) {
+                            queryBlackholeInjector.updateLastQuery(query, conn);
+                        } catch (SQLException e) {
+                            System.err.println("[QueryBlackhole] DB logging failed: " + e.getMessage());
+                        }
+                        if (isScenarioEnabled("disk_fault_injection") && diskFaultInjector.shouldBlockQuery(query)) {
+                            System.out.println("🛑 [Disk Fault] Blocking write query due to disk fault: " + query);
+                            try {
+                                OutputStream clientOut = clientSocket.getOutputStream();
+                                clientOut.write(diskFaultInjector.fakeDiskFullErrorPacket());
+                                clientOut.flush();
+                            } catch (IOException e) {
+                                System.err.println("Failed to send disk fault error packet: " + e.getMessage());
+                            }
+                            return; // Skip sending to DB
+                        }
+
                     }
                 }
+
                 mysqlOut.write(packet);
                 mysqlOut.flush();
             }
@@ -269,11 +319,13 @@ public class MySQLProxy {
 
                 ConnectionState currentState = state.get();
 
+
                 if (!currentState.isHandshakeComplete() && isOkPacket(packet)) {
                     currentState.setHandshakeComplete(true);
                     System.out.println("[MySQLProxy] Handshake complete for a connection.");
                     attemptStartStressTest(); // Attempt to start on handshake completion
                 }
+
 
                 if (currentState.isHandshakeComplete() && currentState.isAddDelay()) {
                     if (isScenarioEnabled("latency_injection")) {
@@ -283,6 +335,11 @@ public class MySQLProxy {
                         currentState.setAddDelay(false);
                     }
                 }
+                if (isScenarioEnabled("query_blackhole") && queryBlackholeInjector.shouldDropResponse()) {
+                    System.out.println("🛑 [Query Blackhole] Dropping server->client response packet.");
+                    continue;
+                }
+
 
                 if (isScenarioEnabled("packet_loss") && packetLossInjector.shouldDropPacket()) {
                     System.out.println("🔥 [Packet Loss] Dropping server->client packet (" + packet.length + " bytes)");
@@ -295,8 +352,11 @@ public class MySQLProxy {
                     stressTester.stopStressTest();
                 }
 
+
+
                 clientOut.write(packet);
                 clientOut.flush();
+
             }
         } catch (IOException | InterruptedException e) {
             System.err.println("Server to client error: " + e.getMessage());
