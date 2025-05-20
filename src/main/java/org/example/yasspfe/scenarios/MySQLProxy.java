@@ -9,8 +9,6 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class MySQLProxy {
-
-
     private static final String DB_URL = "jdbc:mysql://localhost:3306/proxybase";
     private static final String DB_USER = "root";
     private static final String DB_PASSWORD = "root";
@@ -19,22 +17,18 @@ public class MySQLProxy {
     private static final QueryBlackholeInjector queryBlackholeInjector = new QueryBlackholeInjector();
     private static final ConnectionKillInjector connectionKillInjector = new ConnectionKillInjector();
     private static final DiskFaultInjector diskFaultInjector = new DiskFaultInjector();
-
-
-
-
-
+    private static final LatencyInjector latencyInjector = new LatencyInjector();
+    private static final PacketLossInjector packetLossInjector = new PacketLossInjector(0.1); // 10% loss rate
 
     private static String targetHost = "localhost"; // Default value
     private static int targetPort = 3306;
-
+    private static boolean frontendConfigured = false; // Flag to track if frontend config is set
 
     public static void setTargetConnectionInfo(String host, int port) {
         targetHost = host;
         targetPort = port;
-        System.out.println("[MySQLProxy] Target connection info set to " + host + ":" + port + ", DB: " );
+        System.out.println("[MySQLProxy] Target connection info set to " + host + ":" + port);
     }
-
 
     public static String getTargetHost() {
         return targetHost;
@@ -47,8 +41,6 @@ public class MySQLProxy {
     public static DatabaseStressTester getStressTester() {
         return stressTester;
     }
-
-
 
     // Method to set connection info for the stress tester
     public static void setStressTesterConnectionInfo(String jdbcUrl, String username, String password) {
@@ -67,15 +59,12 @@ public class MySQLProxy {
         return frontendConfigured;
     }
 
-    // Make the packet loss injector static
-    private static final PacketLossInjector packetLossInjector = new PacketLossInjector(0.1); // 10% loss rate
-    private static boolean frontendConfigured = false; // Flag to track if frontend config is set
-
     public static void main(String[] args) throws IOException {
-        setStressTesterConnectionInfo(DB_URL, DB_USER, DB_PASSWORD); // Add this line
+        setStressTesterConnectionInfo(DB_URL, DB_USER, DB_PASSWORD);
         updateScenariosOnce();
-        updateTargetConnectionInfo(); // New method to get target connection info
+        updateTargetConnectionInfo();
 
+        // Background thread to update scenarios and connection info
         new Thread(() -> {
             while (true) {
                 updateScenariosOnce();
@@ -88,6 +77,7 @@ public class MySQLProxy {
                 }
             }
         }).start();
+
         ServerSocket proxyServer = new ServerSocket(3301);
         System.out.println("MySQL Proxy started on port 3301");
 
@@ -116,8 +106,6 @@ public class MySQLProxy {
         }
     }
 
-
-
     private static void updateTargetConnectionInfo() {
         System.out.println("Fetching target database connection info...");
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
@@ -139,50 +127,32 @@ public class MySQLProxy {
                     setTargetConnectionInfo(host, port);
                 }
             }
-
         } catch (SQLException e) {
-            // Handle error if query fails (e.g., table not found)
             System.err.println("Error fetching target connection info: " + e.getMessage());
         }
     }
+
     private static boolean isDatabaseReachable(String host, int port) {
         String jdbcUrl = "jdbc:mysql://" + host + ":" + port;
         try (Connection conn = DriverManager.getConnection(jdbcUrl, DB_USER, DB_PASSWORD)) {
             // If connection is established, database is reachable
             return true;
         } catch (SQLException e) {
-            // Connection failed, log the error
             System.err.println("Error connecting to database: " + e.getMessage());
             return false;
         }
     }
 
-
-    // In MySQLProxy.java, modify the updateScenariosOnce() method:
-
     private static void updateScenariosOnce() {
         if (stressTester == null) {
             stressTester = new DatabaseStressTester(); // Ensure it's not null
         }
-        boolean blackholeEnabled = scenarios.getOrDefault("query_blackhole", false);
-        queryBlackholeInjector.setEnabled(blackholeEnabled);
-        System.out.println("🛑 [Query Blackhole] Scenario enabled: " + blackholeEnabled);
-
 
         // Validate the database connection before proceeding with scenarios
         if (!isDatabaseConnected()) {
             System.err.println("[MySQLProxy] Unable to connect to database. Skipping scenario updates.");
             return;  // Exit early if the connection is not valid
         }
-        boolean killEnabled = scenarios.getOrDefault("connection_kill", false);
-        connectionKillInjector.setEnabled(killEnabled);
-        System.out.println("💣 [Connection Kill] Scenario enabled: " + killEnabled);
-
-        boolean diskFaultEnabled = scenarios.getOrDefault("disk_fault_injection", false);
-        diskFaultInjector.setEnabled(diskFaultEnabled);
-        System.out.println("🗃️ [Disk Fault] Scenario enabled: " + diskFaultEnabled);
-
-
 
         System.out.println("Fetching scenario settings from the database...");
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
@@ -216,8 +186,28 @@ public class MySQLProxy {
                 }
             }
 
+            // Update injector states based on scenario settings
+            boolean blackholeEnabled = scenarios.getOrDefault("query_blackhole", false);
+            queryBlackholeInjector.setEnabled(blackholeEnabled);
+            System.out.println("🛑 [Query Blackhole] Scenario enabled: " + blackholeEnabled);
 
-            // Continue with scenario checks as usual
+            boolean killEnabled = scenarios.getOrDefault("connection_kill", false);
+            connectionKillInjector.setEnabled(killEnabled);
+            System.out.println("💣 [Connection Kill] Scenario enabled: " + killEnabled);
+
+            boolean diskFaultEnabled = scenarios.getOrDefault("disk_fault_injection", false);
+            diskFaultInjector.setEnabled(diskFaultEnabled);
+            System.out.println("🗃️ [Disk Fault] Scenario enabled: " + diskFaultEnabled);
+
+            boolean packetLossEnabled = scenarios.getOrDefault("packet_loss", false);
+            packetLossInjector.setEnabled(packetLossEnabled);
+            System.out.println("🔥 [Packet Loss] Scenario enabled: " + packetLossEnabled);
+
+            boolean latencyEnabled = scenarios.getOrDefault("latency_injection", false);
+            latencyInjector.setEnabled(latencyEnabled);
+            System.out.println("⏱️ [Latency Injection] Scenario enabled: " + latencyEnabled);
+
+            // Handle stress testing
             boolean stressTestingEnabled = scenarios.getOrDefault("stress_testing", false);
 
             System.out.println("💥 [Stress Test] Status check:");
@@ -244,7 +234,6 @@ public class MySQLProxy {
         }
     }
 
-    // Add a method to validate the connection before applying scenarios
     private static boolean isDatabaseConnected() {
         try (Connection conn = DriverManager.getConnection("jdbc:mysql://" + targetHost + ":" + targetPort + "/proxybase", DB_USER, DB_PASSWORD)) {
             return conn != null && !conn.isClosed();
@@ -254,7 +243,6 @@ public class MySQLProxy {
         }
     }
 
-
     private static void forwardClientToServer(Socket clientSocket, Socket mysqlSocket, AtomicReference<ConnectionState> state) {
         try (InputStream clientIn = clientSocket.getInputStream();
              OutputStream mysqlOut = mysqlSocket.getOutputStream()) {
@@ -262,42 +250,39 @@ public class MySQLProxy {
             while (!clientSocket.isClosed() && !mysqlSocket.isClosed()) {
                 byte[] packet = readPacket(clientIn);
                 if (packet == null) break;
-                if (isScenarioEnabled("packet_loss") && packetLossInjector.shouldDropPacket()) {
-                    System.out.println("🔥 [Packet Loss] Dropping client->server packet (" + packet.length + " bytes)");
+
+                if (isScenarioEnabled("packet_loss") && packetLossInjector.shouldSuppressResponseAfterDb()) {
+                    System.out.println("🔥 [Packet Loss] Suppressing server->client response (after DB)");
                     continue;
                 }
+
 
                 ConnectionState currentState = state.get();
                 if (currentState.isHandshakeComplete() && isComQuery(packet)) {
                     String query = extractQuery(packet);
                     if (query != null) {
-                        currentState.setCurrentQueryType(getQueryType(query));
-                        System.out.println("Detected query: " + query);
+                        String queryType = getQueryType(query);
+                        currentState.setCurrentQueryType(queryType);
+                        currentState.setLastQuery(query); // Store for later use
+                        System.out.println("Detected query: " + query + " (Type: " + queryType + ")");
 
-                        // 💣 Call the connection kill scenario
-                        if (connectionKillInjector.shouldKill(query)) {
-                            connectionKillInjector.killConnection(clientSocket);
-                            return; // 💥 Kill and stop forwarding
+                        if (isScenarioEnabled("latency_injection")) {
+                            latencyInjector.injectLatencyBeforeQuery(query);
                         }
 
-                        // ✅ Log for query blackhole (optional)
-                        try (Connection conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/proxybase", "root", "root")) {
+                        if (isScenarioEnabled("connection_kill") && connectionKillInjector.shouldKill(query)) {
+                            System.out.println("💣 [Connection Kill] Killing connection for query: " + query);
+                            connectionKillInjector.killConnection(clientSocket);
+                            return;
+                        }
+
+                        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)) {
                             queryBlackholeInjector.updateLastQuery(query, conn);
                         } catch (SQLException e) {
                             System.err.println("[QueryBlackhole] DB logging failed: " + e.getMessage());
                         }
-                        if (isScenarioEnabled("disk_fault_injection") && diskFaultInjector.shouldBlockQuery(query)) {
-                            System.out.println("🛑 [Disk Fault] Blocking write query due to disk fault: " + query);
-                            try {
-                                OutputStream clientOut = clientSocket.getOutputStream();
-                                clientOut.write(diskFaultInjector.fakeDiskFullErrorPacket());
-                                clientOut.flush();
-                            } catch (IOException e) {
-                                System.err.println("Failed to send disk fault error packet: " + e.getMessage());
-                            }
-                            return; // Skip sending to DB
-                        }
 
+                        // ❌ Remove diskFaultInjector.shouldBlockQuery() from here!
                     }
                 }
 
@@ -309,6 +294,8 @@ public class MySQLProxy {
         }
     }
 
+
+
     private static void forwardServerToClient(Socket mysqlSocket, Socket clientSocket, AtomicReference<ConnectionState> state) {
         try (InputStream mysqlIn = mysqlSocket.getInputStream();
              OutputStream clientOut = clientSocket.getOutputStream()) {
@@ -319,54 +306,57 @@ public class MySQLProxy {
 
                 ConnectionState currentState = state.get();
 
-
                 if (!currentState.isHandshakeComplete() && isOkPacket(packet)) {
                     currentState.setHandshakeComplete(true);
                     System.out.println("[MySQLProxy] Handshake complete for a connection.");
-                    attemptStartStressTest(); // Attempt to start on handshake completion
+                    attemptStartStressTest();
                 }
 
+                // ✅ Disk fault injection happens here AFTER the query has been executed by the DB
+                if (isScenarioEnabled("disk_fault_injection")) {
+                    String lastQuery = currentState.getLastQuery();
+                    boolean dbExecutionSuccess = isOkPacket(packet); // MySQL OK packet
 
-                if (currentState.isHandshakeComplete() && currentState.isAddDelay()) {
-                    if (isScenarioEnabled("latency_injection")) {
-                        long latency = getLatencyForType(currentState.getCurrentQueryType());
-                        System.out.println("Injecting latency: " + latency + " ms for query type: " + currentState.getCurrentQueryType());
-                        Thread.sleep(latency);
-                        currentState.setAddDelay(false);
+                    if (diskFaultInjector.shouldInjectError(lastQuery, dbExecutionSuccess)) {
+                        System.out.println("🗃️ [Disk Fault] Injecting fake disk error AFTER DB execution.");
+                        clientOut.write(diskFaultInjector.fakeDiskErrorPacket());
+                        clientOut.flush();
+                        continue; // skip sending real response
                     }
                 }
+
                 if (isScenarioEnabled("query_blackhole") && queryBlackholeInjector.shouldDropResponse()) {
                     System.out.println("🛑 [Query Blackhole] Dropping server->client response packet.");
                     continue;
                 }
 
-
-                if (isScenarioEnabled("packet_loss") && packetLossInjector.shouldDropPacket()) {
-                    System.out.println("🔥 [Packet Loss] Dropping server->client packet (" + packet.length + " bytes)");
+                // Handle post-DB packet loss (simulate response being lost AFTER DB processed query)
+                if (isScenarioEnabled("packet_loss") && packetLossInjector.shouldSuppressResponseAfterDb()) {
+                    System.out.println("🔥 [Packet Loss] Suppressing server->client response (after DB)");
                     continue;
                 }
 
-                // Stop stress test if scenario is disabled
+
+
                 if (!isScenarioEnabled("stress_testing") && stressTester.isRunning()) {
                     System.out.println("💥 [Stress Test] Stopping test as scenario is disabled");
                     stressTester.stopStressTest();
                 }
 
-
-
                 clientOut.write(packet);
                 clientOut.flush();
-
             }
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
             System.err.println("Server to client error: " + e.getMessage());
         }
     }
 
+
     private static void attemptStartStressTest() {
         if (isScenarioEnabled("stress_testing") && isFrontendConfigured() && !stressTester.isRunning()) {
             System.out.println("💥 [Stress Test] Attempting to start stress test - Scenario: " + isScenarioEnabled("stress_testing") + ", Configured: " + isFrontendConfigured() + ", Running: " + stressTester.isRunning());
-            stressTester.startStressTest();
+            boolean started = stressTester.startStressTest();
+            System.out.println("💥 [Stress Test] Start attempt result: " + started);
         } else {
             System.out.println("[MySQLProxy] Conditions not met to start stress test - Scenario: " + isScenarioEnabled("stress_testing") + ", Configured: " + isFrontendConfigured() + ", Running: " + stressTester.isRunning());
         }
@@ -374,8 +364,7 @@ public class MySQLProxy {
 
     private static boolean isScenarioEnabled(String scenarioName) {
         synchronized (scenarios) {
-            boolean enabled = scenarios.getOrDefault(scenarioName, false);
-            return enabled;
+            return scenarios.getOrDefault(scenarioName, false);
         }
     }
 
@@ -434,18 +423,6 @@ public class MySQLProxy {
         return "OTHER";
     }
 
-    private static long getLatencyForType(String type) {
-        if (type == null) return 0;
-        return switch (type) {
-            case "DQL" -> 600;
-            case "DML" -> 60000;
-            case "DDL" -> 500;
-            case "TCL" -> 150;
-            case "DCL" -> 250;
-            default -> 0;
-        };
-    }
-
     private static void closeSockets(Socket... sockets) {
         for (Socket socket : sockets) {
             try {
@@ -460,6 +437,7 @@ public class MySQLProxy {
 
     public static class ConnectionState {
         private String currentQueryType;
+        private String lastQuery;
         private boolean addDelay;
         private boolean handshakeComplete = false;
 
@@ -487,5 +465,14 @@ public class MySQLProxy {
         public synchronized void setHandshakeComplete(boolean complete) {
             this.handshakeComplete = complete;
         }
+
+        public synchronized String getLastQuery() {
+            return lastQuery;
+        }
+
+        public synchronized void setLastQuery(String lastQuery) {
+            this.lastQuery = lastQuery;
+        }
     }
+
 }
